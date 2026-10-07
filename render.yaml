@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: chatwave-avn
+    runtime: docker
+    plan: free
+    healthCheckPath: /
