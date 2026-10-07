@@ -8,6 +8,13 @@ const clients = new Set();
 const messages = [];
 const groups = [{ id: 'general', name: 'Family Group', members: [] }];
 
+function contentType(file) {
+  if (file.endsWith('.js')) return 'text/javascript; charset=utf-8';
+  if (file.endsWith('.css')) return 'text/css; charset=utf-8';
+  if (file.endsWith('.json')) return 'application/json; charset=utf-8';
+  return 'text/html; charset=utf-8';
+}
+
 function frame(text) {
   const payload = Buffer.from(text);
   if (payload.length < 126) return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
@@ -63,7 +70,7 @@ const server = http.createServer((request, response) => {
   if (!file.startsWith(__dirname) || !fs.existsSync(file)) { response.writeHead(404); return response.end('Not found'); }
   let html = fs.readFileSync(file);
   if (file.endsWith('index.html')) html = Buffer.from(html.toString().replace('</body>', `<script src="/realtime-client.js"></script></body>`));
-  response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(html);
+  response.writeHead(200, { 'Content-Type': contentType(file) }); response.end(html);
 });
 
 server.on('upgrade', (request, socket) => {
