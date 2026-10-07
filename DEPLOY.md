@@ -1,8 +1,10 @@
-# Deploy ChatWave AVN
+# Deploy ChatWave AVN with Streamlit Community Cloud
 
-1. Push this folder to a GitHub repository.
-2. In Render, choose **New → Web Service** and connect the repository.
-3. Select Docker deployment. Render will use the included `Dockerfile`.
-4. Deploy the service and open the generated HTTPS URL.
+1. Push this folder to your GitHub repository.
+2. Open [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub.
+3. Click **Create app**.
+4. Select your `ChatWave` repository and the `main` branch.
+5. Set **Main file path** to `streamlit_app.py`.
+6. Click **Deploy** and open the generated app URL.
 
-The server uses the Render-provided `PORT` value and supports WebSocket connections automatically. This prototype stores messages in memory; add a database before production use so messages survive restarts.
+For Render, create a PostgreSQL database, copy its internal connection string into `DATABASE_URL`, and add a long random `JWT_SECRET` environment variable. The server creates the required tables automatically on startup.

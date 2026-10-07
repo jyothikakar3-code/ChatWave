@@ -1,87 +1,18 @@
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-
-const port = Number(process.env.PORT || 8787);
-const clients = new Set();
-const messages = [];
-const groups = [{ id: 'general', name: 'Family Group', members: [] }];
-
-function contentType(file) {
-  if (file.endsWith('.js')) return 'text/javascript; charset=utf-8';
-  if (file.endsWith('.css')) return 'text/css; charset=utf-8';
-  if (file.endsWith('.json')) return 'application/json; charset=utf-8';
-  return 'text/html; charset=utf-8';
-}
-
-function frame(text) {
-  const payload = Buffer.from(text);
-  if (payload.length < 126) return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
-  if (payload.length < 65536) { const head = Buffer.alloc(4); head[0] = 0x81; head[1] = 126; head.writeUInt16BE(payload.length, 2); return Buffer.concat([head, payload]); }
-  const head = Buffer.alloc(10); head[0] = 0x81; head[1] = 127; head.writeBigUInt64BE(BigInt(payload.length), 2); return Buffer.concat([head, payload]);
-}
-
-function broadcast(data) {
-  const packet = frame(JSON.stringify(data));
-  for (const client of clients) client.socket.write(packet);
-}
-
-function send(client, data) { client.socket.write(frame(JSON.stringify(data))); }
-
-function handleMessage(client, payload) {
-  let data;
-  try { data = JSON.parse(payload); } catch { return; }
-  if (data.type === 'hello') {
-    client.user = { id: data.userId || crypto.randomUUID(), name: data.name || 'Guest' };
-    send(client, { type: 'ready', user: client.user, groups });
-    broadcast({ type: 'presence', user: client.user, online: true });
-  }
-  if (data.type === 'message' && client.user && data.text?.trim()) {
-    const message = { id: crypto.randomUUID(), conversationId: data.conversationId || 'direct', text: data.text.trim(), sender: client.user, sentAt: new Date().toISOString() };
-    messages.push(message);
-    broadcast({ type: 'message', message });
-  }
-  if (data.type === 'history') send(client, { type: 'history', messages: messages.filter(item => item.conversationId === data.conversationId) });
-  if (data.type === 'create-group' && client.user && data.name?.trim()) {
-    const group = { id: crypto.randomUUID(), name: data.name.trim(), members: [client.user.id] };
-    groups.push(group);
-    broadcast({ type: 'group-created', group });
-  }
-}
-
-function parseFrames(client, buffer) {
-  while (buffer.length >= 2) {
-    const second = buffer[1]; let length = second & 127; let offset = 2;
-    if (length === 126) { if (buffer.length < 4) return buffer; length = buffer.readUInt16BE(2); offset = 4; }
-    if (length === 127) { if (buffer.length < 10) return buffer; length = Number(buffer.readBigUInt64BE(2)); offset = 10; }
-    const masked = Boolean(second & 128); if (masked) offset += 4;
-    if (buffer.length < offset + length) return buffer;
-    let body = buffer.subarray(offset, offset + length);
-    if (masked) { const key = buffer.subarray(offset - 4, offset); body = Buffer.from(body); for (let i = 0; i < body.length; i++) body[i] ^= key[i % 4]; }
-    if ((buffer[0] & 15) === 1) handleMessage(client, body.toString());
-    buffer = buffer.subarray(offset + length);
-  }
-  return buffer;
-}
-
-const server = http.createServer((request, response) => {
-  const file = path.join(__dirname, request.url === '/' ? 'index.html' : request.url);
-  if (!file.startsWith(__dirname) || !fs.existsSync(file)) { response.writeHead(404); return response.end('Not found'); }
-  let html = fs.readFileSync(file);
-  if (file.endsWith('index.html')) html = Buffer.from(html.toString().replace('</body>', `<script src="/realtime-client.js"></script></body>`));
-  response.writeHead(200, { 'Content-Type': contentType(file) }); response.end(html);
-});
-
-server.on('upgrade', (request, socket) => {
-  if (request.headers.upgrade?.toLowerCase() !== 'websocket') return socket.destroy();
-  const key = request.headers['sec-websocket-key'];
-  const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
-  const client = { socket, user: null }; clients.add(client); let buffer = Buffer.alloc(0);
-  socket.on('data', chunk => { buffer = parseFrames(client, Buffer.concat([buffer, chunk])); });
-  socket.on('close', () => { clients.delete(client); if (client.user) broadcast({ type: 'presence', user: client.user, online: false }); });
-  socket.on('error', () => clients.delete(client));
-});
-
-server.listen(port, () => console.log(`ChatWave AVN running at http://localhost:${port}`));
+require('dotenv').config();
+const path=require('path');const fs=require('fs');const http=require('http');const express=require('express');const cookieParser=require('cookie-parser');const bcrypt=require('bcrypt');const jwt=require('jsonwebtoken');const{Pool}=require('pg');const{Server}=require('socket.io');
+const port=Number(process.env.PORT||8787),secret=process.env.JWT_SECRET||'change-me',pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.NODE_ENV==='production'?{rejectUnauthorized:false}:false}),app=express(),server=http.createServer(app),io=new Server(server,{cors:{origin:false}});
+const q=(text,values)=>pool.query(text,values);const token=u=>jwt.sign({sub:String(u.id),username:u.username,displayName:u.display_name},secret,{expiresIn:'30d'});const auth=req=>{try{return jwt.verify(req.cookies.chatwave_token,secret)}catch{return null}};const safe=u=>({id:String(u.id),username:u.username,displayName:u.display_name,online:u.online,lastSeen:u.last_seen});
+async function init(){if(!process.env.DATABASE_URL)throw Error('DATABASE_URL is required');await q(`CREATE TABLE IF NOT EXISTS users(id BIGSERIAL PRIMARY KEY,username TEXT UNIQUE NOT NULL,display_name TEXT NOT NULL,password_hash TEXT NOT NULL,online BOOLEAN DEFAULT FALSE,last_seen TIMESTAMPTZ DEFAULT NOW());CREATE TABLE IF NOT EXISTS conversations(id BIGSERIAL PRIMARY KEY,kind TEXT DEFAULT 'direct',title TEXT,created_at TIMESTAMPTZ DEFAULT NOW());CREATE TABLE IF NOT EXISTS conversation_members(conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE,user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,last_read_message_id BIGINT,PRIMARY KEY(conversation_id,user_id));CREATE TABLE IF NOT EXISTS messages(id BIGSERIAL PRIMARY KEY,conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE,sender_id BIGINT REFERENCES users(id) ON DELETE CASCADE,body TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT NOW());CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_id,id DESC);`)}
+function requireAuth(req,res,next){req.user=auth(req);if(!req.user)return res.status(401).json({error:'Authentication required'});next()}
+async function memberIds(id){return(await q('SELECT user_id FROM conversation_members WHERE conversation_id=$1',[id])).rows.map(x=>String(x.user_id))}async function updateConversation(id){for(const uid of await memberIds(id))io.to('user:'+uid).emit('conversation:update')}
+app.use(express.json(),cookieParser(),express.static(__dirname,{index:false}));app.get('/',(_,res)=>{const html=fs.readFileSync(path.join(__dirname,'index.html'),'utf8').replace('</body>','<script src="/socket.io/socket.io.js"></script><script src="/realtime-client.js"></script></body>');res.type('html').send(html)});
+app.get('/app',(_,res)=>res.sendFile(path.join(__dirname,'index.html')));
+app.post('/api/auth/signup',async(req,res)=>{try{const{username,displayName,password}=req.body;if(!/^[\w]{3,24}$/.test(username||'')||!displayName?.trim()||(password||'').length<8)return res.status(400).json({error:'Use a username, display name, and an 8+ character password.'});const r=await q('INSERT INTO users(username,display_name,password_hash) VALUES($1,$2,$3) RETURNING *',[username.toLowerCase(),displayName.trim(),await bcrypt.hash(password,12)]);res.cookie('chatwave_token',token(r.rows[0]),{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:2592e6});res.json({user:safe(r.rows[0])})}catch(e){res.status(e.code==='23505'?409:500).json({error:e.code==='23505'?'Username already exists.':'Unable to create account.'})}});
+app.post('/api/auth/login',async(req,res)=>{const r=await q('SELECT * FROM users WHERE username=$1',[(req.body.username||'').toLowerCase()]),u=r.rows[0];if(!u||!(await bcrypt.compare(req.body.password||'',u.password_hash)))return res.status(401).json({error:'Incorrect username or password.'});res.cookie('chatwave_token',token(u),{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:2592e6});res.json({user:safe(u)})});app.post('/api/auth/logout',requireAuth,async(req,res)=>{await q('UPDATE users SET online=false,last_seen=NOW() WHERE id=$1',[req.user.sub]);res.clearCookie('chatwave_token');res.json({ok:true})});app.get('/api/auth/me',requireAuth,async(req,res)=>{const r=await q('SELECT * FROM users WHERE id=$1',[req.user.sub]);res.json({user:safe(r.rows[0])})});
+app.get('/api/users/search',requireAuth,async(req,res)=>{const r=await q('SELECT id,username,display_name,online,last_seen FROM users WHERE id<>$1 AND (username ILIKE $2 OR display_name ILIKE $2) LIMIT 20',[req.user.sub,'%'+(req.query.q||'')+'%']);res.json({users:r.rows.map(safe)})});
+app.get('/api/conversations',requireAuth,async(req,res)=>{const r=await q(`SELECT c.id,c.kind,c.title,o.id other_id,o.username other_username,o.display_name other_display_name,o.online other_online,o.last_seen other_last_seen,l.body last_body,l.created_at last_created,COALESCE(u.count,0)::int unread FROM conversations c JOIN conversation_members cm ON cm.conversation_id=c.id AND cm.user_id=$1 LEFT JOIN conversation_members om ON om.conversation_id=c.id AND om.user_id<>$1 LEFT JOIN users o ON o.id=om.user_id LEFT JOIN LATERAL(SELECT body,created_at FROM messages WHERE conversation_id=c.id ORDER BY id DESC LIMIT 1)l ON true LEFT JOIN LATERAL(SELECT COUNT(*) FROM messages m WHERE m.conversation_id=c.id AND m.sender_id<>$1 AND(cm.last_read_message_id IS NULL OR m.id>cm.last_read_message_id))u ON true ORDER BY l.created_at DESC NULLS LAST,c.created_at DESC`,[req.user.sub]);res.json({conversations:r.rows.map(x=>({id:String(x.id),kind:x.kind,title:x.title||x.other_display_name,other:x.other_id?{id:String(x.other_id),username:x.other_username,displayName:x.other_display_name,online:x.other_online,lastSeen:x.other_last_seen}:null,lastMessage:x.last_body||'',lastCreated:x.last_created,unread:x.unread}))})});
+app.post('/api/conversations/direct',requireAuth,async(req,res)=>{const t=(await q('SELECT id FROM users WHERE username=$1',[(req.body.username||'').toLowerCase()])).rows[0];if(!t||String(t.id)===req.user.sub)return res.status(404).json({error:'User not found.'});let c=(await q(`SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id=c.id AND a.user_id=$1 JOIN conversation_members b ON b.conversation_id=c.id AND b.user_id=$2 WHERE c.kind='direct' LIMIT 1`,[req.user.sub,t.id])).rows[0]?.id;if(!c){c=(await q("INSERT INTO conversations(kind) VALUES('direct') RETURNING id")).rows[0].id;await q('INSERT INTO conversation_members VALUES($1,$2),($1,$3)',[c,req.user.sub,t.id])}res.json({conversationId:String(c)})});
+app.get('/api/conversations/:id/messages',requireAuth,async(req,res)=>{const ok=(await q('SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[req.params.id,req.user.sub])).rows[0];if(!ok)return res.status(403).json({error:'Not a member.'});const r=await q('SELECT m.id,m.body,m.created_at,u.id sender_id,u.username,u.display_name FROM messages m JOIN users u ON u.id=m.sender_id WHERE m.conversation_id=$1 ORDER BY m.id DESC LIMIT 50',[req.params.id]);await q('UPDATE conversation_members SET last_read_message_id=COALESCE((SELECT MAX(id) FROM messages WHERE conversation_id=$1),last_read_message_id) WHERE conversation_id=$1 AND user_id=$2',[req.params.id,req.user.sub]);res.json({messages:r.rows.reverse().map(x=>({id:String(x.id),body:x.body,createdAt:x.created_at,sender:{id:String(x.sender_id),username:x.username,displayName:x.display_name}}))})});
+app.post('/api/conversations/:id/messages',requireAuth,async(req,res)=>{const ok=(await q('SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[req.params.id,req.user.sub])).rows[0];if(!ok||!req.body.body?.trim())return res.status(400).json({error:'Invalid message.'});const r=(await q('INSERT INTO messages(conversation_id,sender_id,body) VALUES($1,$2,$3) RETURNING id,created_at',[req.params.id,req.user.sub,req.body.body.trim()])).rows[0];const message={id:String(r.id),conversationId:String(req.params.id),body:req.body.body.trim(),createdAt:r.created_at,sender:{id:String(req.user.sub),username:req.user.username,displayName:req.user.displayName}};for(const uid of await memberIds(req.params.id))io.to('user:'+uid).emit('message:new',message);await updateConversation(req.params.id);res.status(201).json({message})});
+io.use((socket,next)=>{try{const raw=socket.handshake.headers.cookie?.split(';').find(x=>x.trim().startsWith('chatwave_token='));socket.user=jwt.verify(raw.trim().split('=')[1],secret);next()}catch{next(new Error('unauthorized'))}});io.on('connection',async s=>{const uid=s.user.sub;s.join('user:'+uid);await q('UPDATE users SET online=true WHERE id=$1',[uid]);s.broadcast.emit('presence:update',{userId:String(uid),online:true});s.on('conversation:open',async({conversationId})=>{if((await q('SELECT 1 FROM conversation_members WHERE conversation_id=$1 AND user_id=$2',[conversationId,uid])).rows[0])s.join('conversation:'+conversationId)});s.on('conversation:read',async({conversationId})=>{await q('UPDATE conversation_members SET last_read_message_id=COALESCE((SELECT MAX(id) FROM messages WHERE conversation_id=$1),last_read_message_id) WHERE conversation_id=$1 AND user_id=$2',[conversationId,uid]);updateConversation(conversationId)});s.on('disconnect',async()=>{await q('UPDATE users SET online=false,last_seen=NOW() WHERE id=$1',[uid]);s.broadcast.emit('presence:update',{userId:String(uid),online:false})})});
+init().then(()=>server.listen(port,()=>console.log('ChatWave running on '+port))).catch(e=>{console.error(e);process.exit(1)});
